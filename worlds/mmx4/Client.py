@@ -199,6 +199,8 @@ class MMX4Client(BizHawkClient):
         self.inventory_box = None
         self.inventory_expanded = True
         self.gui_tab_attach_tried = False
+        self.weapon = 0
+        self.read_results = []
 
     async def validate_rom(self, ctx: "BizHawkClientContext") -> bool:
         try:
@@ -716,6 +718,13 @@ class MMX4Client(BizHawkClient):
                 "operations": []
             }])
         try:
+            # Read Values
+            self.read_results = await bizhawk.read(ctx.bizhawk_ctx, [
+                (ADDRESS_ARMOR_PICKED_UP, 5, self.ram), # 0 = armor picked up
+                (ADDRESS_BOSSES_DEFEATED, 22, self.ram), # 1 = bosses defeated
+                (ADDRESS_WEAPON_SELECTED, 1, self.ram), # 2 = selected weapon
+                (ADDRESS_SELECT_PRESSED, 1, self.ram) # 3 = select pressed
+                ]);
             await self.location_check(ctx)
             await self._process_energy_pickups(ctx)
             #await self.received_items_check(ctx)
@@ -789,11 +798,11 @@ class MMX4Client(BizHawkClient):
 
             override_weapon = False
             # Detect selected weapon to allow charging any weapon as long as you have either plasma shot or stock charge
-            if (await bizhawk.read(ctx.bizhawk_ctx, [(ADDRESS_WEAPON_SELECTED, 1, self.ram)]))[0][0] > 0 and unlocked_buster_value & 0b11 > 0:
+            if self.read_results[2][0] > 0 and unlocked_buster_value & 0b11 > 0:
                 override_weapon = True
 
             # Detect select press to switch between buster types
-            if (await bizhawk.read(ctx.bizhawk_ctx, [(ADDRESS_SELECT_PRESSED, 1, self.ram)]))[0][0] & 1 == 1:
+            if self.read_results[3][0] & 1 == 1:
                 self.weapon += 1
                 if self.weapon == 1 and unlocked_buster_value & 0b01 == 0:
                     self.weapon += 1
@@ -807,18 +816,15 @@ class MMX4Client(BizHawkClient):
 
             # Lock here before we do our edits
             await bizhawk.lock(ctx.bizhawk_ctx)
-            # Write Weapons
-            await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_WEAPONS_FLAGS, [unlocked_weapons_value], self.ram)])
-            # Write Armor
-            await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_ARMOR_FLAGS, [unlocked_armor_value], self.ram)])
-            # Write Buster Type
-            await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_ARMS_FLAGS, [self.weapon], self.ram)])
-            # Write Max Health
-            await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_MAX_HEALTH, [max_health_value], self.ram)])
-            # Write Tanks
-            await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_TANK_FLAGS, [unlocked_tanks_value], self.ram)])
-            # Write Stage Access
-            await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_STAGE_ACCESS, stage_access_writes, self.ram)])
+            # Write Values
+            await bizhawk.write(ctx.bizhawk_ctx, [
+                (ADDRESS_WEAPONS_FLAGS, [unlocked_weapons_value], self.ram), # Weapons
+                (ADDRESS_ARMOR_FLAGS, [unlocked_armor_value], self.ram), # Armor
+                (ADDRESS_ARMS_FLAGS, [self.weapon], self.ram), # Buster Type
+                (ADDRESS_MAX_HEALTH, [max_health_value], self.ram), # Max Health
+                (ADDRESS_TANK_FLAGS, [unlocked_tanks_value], self.ram), # Tanks
+                (ADDRESS_STAGE_ACCESS, stage_access_writes, self.ram) # Stage Access
+                ])
             await self._handle_link_features(ctx, max_health_value)
             await bizhawk.unlock(ctx.bizhawk_ctx)
             return
@@ -831,7 +837,7 @@ class MMX4Client(BizHawkClient):
     async def location_check(self, ctx: "BizHawkClientContext"):
         locs_to_send = set()
         # Read Armor Picked Up
-        unlocked_armor = (await bizhawk.read(ctx.bizhawk_ctx, [(ADDRESS_ARMOR_PICKED_UP, 5, self.ram)]))[0]
+        unlocked_armor = self.read_results[0]
         for i in range(0, 5):
             if unlocked_armor[i] > 0:
                 # Head
@@ -851,7 +857,7 @@ class MMX4Client(BizHawkClient):
                     locs_to_send.add(14574102)
 
         # Read Bosses Defeated
-        defeated_bosses = (await bizhawk.read(ctx.bizhawk_ctx, [(ADDRESS_BOSSES_DEFEATED, 22, self.ram)]))[0]
+        defeated_bosses = self.read_results[1]
         if len(defeated_bosses) == 22:
             for i in range(0, 22):
                 if defeated_bosses[i] > 0:
