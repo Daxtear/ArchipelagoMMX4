@@ -35,6 +35,19 @@ class DamageLink(Toggle):
     display_name = "Damage Link"
 
 
+
+
+class DeathLinkAmnesty(Range):
+    """
+    Number of lives to restore after sending or receiving a DeathLink.
+    This prevents DeathLink from immediately causing repeated game overs.
+    """
+    display_name = "DeathLink Amnesty"
+    range_start = 1
+    range_end = 9
+    default = 3
+
+
 class EnergyLinkAutoHeal(DefaultOnToggle):
     """
     Automatically spend EnergyLink to heal missing HP during gameplay.
@@ -50,6 +63,15 @@ class EnergyLinkCostPerHP(Range):
     range_start = 1
     range_end = 100
     default = 5
+
+
+
+class InfiniteNovaStrike(Toggle):
+    """
+    Lock Nova Strike / Giga Attack energy to full while in-game.
+    This writes 0x30 to the Nova Strike energy RAM value every client tick.
+    """
+    display_name = "Infinite Nova Strike"
 
 class PickupSanity(Toggle):
     """
@@ -320,8 +342,10 @@ class MMX4Options(StartInventoryFromPoolMixin, PerGameCommonOptions):
     death_link: DeathLink
     damage_link: DamageLink
     energy_link: EnergyLink
+    death_link_amnesty: DeathLinkAmnesty
     energy_link_auto_heal: EnergyLinkAutoHeal
     energy_link_cost_per_hp: EnergyLinkCostPerHP
+    infinite_nova_strike: InfiniteNovaStrike
 
     enable_boss_item_requirements: EnableBossItemRequirements
     web_spider_requirement: WebSpiderRequirement
@@ -339,6 +363,6 @@ class MMX4Options(StartInventoryFromPoolMixin, PerGameCommonOptions):
 
 option_groups: Dict[str, List[Any]] = {
     "General Options": [PickupSanity, Character],
-    "Link Options": [DeathLink, DamageLink, EnergyLink, EnergyLinkAutoHeal, EnergyLinkCostPerHP],
+    "Link Options": [DeathLink, DeathLinkAmnesty, DamageLink, EnergyLink, EnergyLinkAutoHeal, EnergyLinkCostPerHP, InfiniteNovaStrike],
     #"Trap Options": [TrapChance, ForcefemTrapWeight, SpeedChangeTrapWeight]
 }
