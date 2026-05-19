@@ -1,13 +1,7 @@
 import asyncio
 import logging
-import os
-import shutil
-import subprocess
-import sys
 import time
 import uuid
-from pathlib import Path
-from collections import deque
 from typing import TYPE_CHECKING
 
 from NetUtils import ClientStatus
@@ -29,6 +23,9 @@ ADDRESS_ARMOR_FLAGS = 0x0F1770
 ADDRESS_ARMS_FLAGS = 0x0F1771
 ADDRESS_MAX_HEALTH = 0x0F1772
 ADDRESS_CURRENT_HEALTH = 0x141924
+ADDRESS_ACTION_STATE = 0x1418CC
+ADDRESS_NOVA_STRIKE_ENERGY = 0x141970
+ADDRESS_LIFE_COUNT = 0x172204
 ADDRESS_WEAPONS_FLAGS = 0x0F1773
 ADDRESS_TANK_FLAGS = 0x0F1774
 # Locations
@@ -44,6 +41,18 @@ ADDRESS_WEAPON_SELECTED = 0x14195B
 # 10 shared-damage points = 1 MMX4 HP.
 DAMAGE_LINK_POINTS_PER_HP = 10
 DAMAGE_LINK_NORMAL_CAP_POINTS = 120
+
+# Location ids that are awarded by boss/stage defeat flags.
+# When one of these appears newly, MMX4 is entering a clear/results flow where
+# current HP can briefly become 0 even though the player did not die.
+DEFEATED_LOCATION_IDS = {
+    14574100, 14574101, 14574104, 14574105, 14574109, 14574110,
+    14574114, 14574115, 14574118, 14574119, 14574122, 14574123,
+    14574125, 14574126, 14574128, 14574129, 14574133, 14574134,
+    14574135, 14574136, 14574137, 14574138, 14574139, 14574140,
+    14574141, 14574142, 14574143, 14574144, 14574145, 14574146,
+    14574300,
+}
 
 # Received AP filler items that should feed EnergyLink.
 ITEM_SMALL_ENERGY = 14575300
@@ -180,11 +189,15 @@ class MMX4Client(BizHawkClient):
         self.ignore_next_damage = False
         self.ignore_next_death = False
         self.force_death_pending = False
+        self.deathlink_suppress_outgoing_until = 0.0
+        self.pending_life_reset_until = 0.0
+        self.pending_life_reset_value = 0
         self.pending_damage = 0
         self.pending_damage_point_remainder = 0
         self.needs_tag_update = False
         self.needs_energy_setup = False
         self.last_energy_pool = None
+        self.last_energy_status_text = ""
         self.last_energy_ui_time = 0.0
         self.energy_ui_interval = 5.0
         self.processed_energy_item_count = 0
@@ -192,6 +205,11 @@ class MMX4Client(BizHawkClient):
         self.processed_pickup_log_entries = set()
         self.energy_once_locations_paid = set()
         self.current_hp = None
+        self.current_lives = None
+        self.last_life_count = None
+        self.deathlink_amnesty_lives = 0
+        self.initial_tutorial_amnesty_applied = False
+        self.extra_lives_tank_count = 0
         self.current_max_hp = 32
         self.current_energy_pool = 0
         self.was_in_level = False
@@ -199,6 +217,10 @@ class MMX4Client(BizHawkClient):
         self.inventory_box = None
         self.inventory_expanded = True
         self.gui_tab_attach_tried = False
+        self.stage_clear_cooldown_until = 0.0
+        self.last_bosses_defeated_bytes = None
+        self.previous_defeated_locations_seen = set()
+        self.stage_clear_suppress_until_positive_hp = False
 
     async def validate_rom(self, ctx: "BizHawkClientContext") -> bool:
         try:
@@ -252,8 +274,12 @@ class MMX4Client(BizHawkClient):
                 return
 
             if "DeathLink" in tags and "DeathLink" in ctx.tags:
-                self.ignore_next_death = True
+                # Incoming DeathLink should kill the player, but must not bounce
+                # another outgoing DeathLink when the life counter changes.
                 self.force_death_pending = True
+                self.deathlink_suppress_outgoing_until = time.time() + 8.0
+                self.pending_life_reset_value = self._deathlink_amnesty_value()
+                self.pending_life_reset_until = time.time() + 8.0
 
             if "SharedDamage" in tags and "SharedDamage" in ctx.tags:
                 # Incoming DamageLink is measured in shared-damage points.
@@ -265,11 +291,33 @@ class MMX4Client(BizHawkClient):
     def _slot_option_enabled(self, name: str) -> bool:
         return bool((self.slot_data or {}).get(name, False))
 
+    def _deathlink_amnesty_value(self) -> int:
+        try:
+            base_amnesty = max(1, min(255, int((self.slot_data or {}).get("death_link_amnesty", 3) or 3)))
+        except (TypeError, ValueError):
+            base_amnesty = 3
+
+        # The Extra Lives Tank gives 2 extra safe deaths. Keep this separate
+        # from the YAML base value so the option remains the starting amnesty.
+        extra_tank_bonus = max(0, int(getattr(self, "extra_lives_tank_count", 0))) * 2
+        return max(1, min(255, base_amnesty + extra_tank_bonus))
+
     async def _read_current_hp(self, ctx: "BizHawkClientContext") -> int:
         return (await bizhawk.read(ctx.bizhawk_ctx, [(ADDRESS_CURRENT_HEALTH, 1, self.ram)]))[0][0]
 
+    async def _read_life_count(self, ctx: "BizHawkClientContext") -> int:
+        return (await bizhawk.read(ctx.bizhawk_ctx, [(ADDRESS_LIFE_COUNT, 1, self.ram)]))[0][0]
+
+    async def _write_life_count(self, ctx: "BizHawkClientContext", value: int) -> None:
+        await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_LIFE_COUNT, [max(0, min(255, int(value)))], self.ram)])
+
     async def _write_current_hp(self, ctx: "BizHawkClientContext", value: int) -> None:
         await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_CURRENT_HEALTH, [max(0, min(255, int(value)))], self.ram)])
+
+    async def _force_player_death(self, ctx: "BizHawkClientContext") -> None:
+        # MMX4 action / animation state 0x03 is the dying/dead state.
+        # This is more reliable for received DeathLink than only setting HP to 0.
+        await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_ACTION_STATE, [0x03], self.ram)])
 
     def _energy_key(self, ctx: "BizHawkClientContext") -> str:
         return f"EnergyLink{ctx.team}"
@@ -284,15 +332,25 @@ class MMX4Client(BizHawkClient):
     def _is_hp_value_in_level(self, current_hp: int, max_health_value: int) -> bool:
         """
         MMX4's active HP address is only safe while gameplay is active.
-        We do not have a dedicated stage/menu flag yet, so use the HP value as
-        the guard: positive sane HP means active gameplay, and 0 is only accepted
-        for one tick after we already saw sane HP so DeathLink can still fire.
+        This guard is used for HP-based systems like EnergyLink healing and
+        DamageLink. DeathLink no longer uses HP at all; it is life-counter based.
         """
+        if time.time() < self.stage_clear_cooldown_until and current_hp <= 0:
+            return False
         if 0 < current_hp <= max_health_value:
             return True
         if current_hp == 0 and self.was_in_level and self.last_hp is not None and self.last_hp > 0:
             return True
         return False
+
+    def _mark_stage_clear_safe_window(self) -> None:
+        self.stage_clear_cooldown_until = time.time() + 30.0
+        self.stage_clear_suppress_until_positive_hp = True
+        self.was_in_level = False
+        self.last_hp = None
+        self.ignore_next_damage = False
+        self.ignore_next_death = False
+        logger.info("MMX4 stage clear/loading window detected; pausing DamageLink and EnergyLink transition effects.")
 
     async def _add_energy_to_pool(self, ctx: "BizHawkClientContext", amount: int) -> None:
         if amount <= 0 or not self._slot_option_enabled("energy_link"):
@@ -363,15 +421,18 @@ class MMX4Client(BizHawkClient):
     def _inventory_lines(self, ctx: "BizHawkClientContext") -> list[str]:
         player_name = ctx.player_names.get(ctx.slot, "Player") if getattr(ctx, "player_names", None) and ctx.slot else "Player"
         hp = "?" if self.current_hp is None else str(self.current_hp)
+        lives = "?" if self.current_lives is None else str(self.current_lives)
         max_hp = "?" if self.current_max_hp is None else str(self.current_max_hp)
         lines = [
             f"Mega Man X4 - {player_name}",
             f"HP: {hp}/{max_hp}",
+            f"DeathLink Amnesty: {self._deathlink_amnesty_value()} | Lives: {lives}",
             f"EnergyLink Pool: {self.current_energy_pool}",
             f"DeathLink: {'On' if self._slot_option_enabled('death_link') else 'Off'}",
             f"DamageLink: {'On' if self._slot_option_enabled('damage_link') else 'Off'}",
             f"Auto Heal: {'On' if self._slot_option_enabled('energy_link_auto_heal') else 'Off'}",
             f"Cost Per HP: {(self.slot_data or {}).get('energy_link_cost_per_hp', 5)}",
+            f"Infinite Nova: {'On' if self._slot_option_enabled('infinite_nova_strike') else 'Off'}",
             "",
             "Received Items:",
         ]
@@ -503,14 +564,17 @@ class MMX4Client(BizHawkClient):
         self.current_max_hp = max_health_value
         self._update_inventory_tab_safe(ctx)
         now = time.time()
-
-        if not force and self.last_energy_pool == pool and now - self.last_energy_ui_time < self.energy_ui_interval:
-            return
-
-        self.last_energy_pool = pool
-        self.last_energy_ui_time = now
         cost_per_hp = max(1, int((self.slot_data or {}).get("energy_link_cost_per_hp", 5) or 5))
         message = f"EnergyLink: {pool} | HP: {current_hp}/{max_health_value} | Cost/HP: {cost_per_hp}"
+
+        # Only print/display when the visible status actually changes.
+        # This prevents the client log from being spammed every watcher tick.
+        if not force and message == self.last_energy_status_text:
+            return
+
+        self.last_energy_status_text = message
+        self.last_energy_pool = pool
+        self.last_energy_ui_time = now
         logger.info(message)
 
         # Newer BizHawk helper modules expose display_message. If this Archipelago
@@ -591,45 +655,123 @@ class MMX4Client(BizHawkClient):
         self._update_inventory_tab_safe(ctx)
         logger.info(f"Healed {heal_amount} HP for {heal_amount * cost_per_hp} EnergyLink. HP is now {current_hp + heal_amount}/{max_hp}.")
 
-    async def _handle_link_features(self, ctx: "BizHawkClientContext", max_health_value: int) -> None:
-        current_hp = await self._read_current_hp(ctx)
-        self.current_hp = current_hp
-        self.current_max_hp = max_health_value
-        in_level = self._is_hp_value_in_level(current_hp, max_health_value)
-
-        if not in_level:
-            self.was_in_level = False
-            self.last_hp = None
-            self._get_energy_pool(ctx)
-            self._update_inventory_tab_safe(ctx)
+    async def _notify_deathlink_enabled(self, ctx: "BizHawkClientContext") -> None:
+        if not self._slot_option_enabled("death_link") or ctx.finished_game:
             return
 
-        self.was_in_level = current_hp > 0
+        now = time.time()
+        if now - self.last_deathlink_enabled_notice_time < 2.0:
+            return
+
+        self.last_deathlink_enabled_notice_time = now
+        message = "DeathLink is now enabled"
+        logger.info(message)
+
+        display_message = getattr(bizhawk, "display_message", None)
+        if display_message is not None:
+            try:
+                await display_message(ctx.bizhawk_ctx, message)
+            except (bizhawk.RequestFailedError, TypeError, AttributeError):
+                pass
+
+    async def _handle_link_features(self, ctx: "BizHawkClientContext", max_health_value: int) -> None:
+        current_hp = await self._read_current_hp(ctx)
+        current_lives = await self._read_life_count(ctx)
+        self.current_hp = current_hp
+        self.current_lives = current_lives
+        self.current_max_hp = max_health_value
+        self._get_energy_pool(ctx)
+
+        # Stage-clear / loading precautions only pause DamageLink and EnergyLink.
+        # DeathLink no longer uses HP or stage-clear suppression; it only checks lives.
+        in_stage_transition = False
+        if self.stage_clear_suppress_until_positive_hp:
+            if 0 < current_hp <= max_health_value:
+                self.stage_clear_suppress_until_positive_hp = False
+                self.stage_clear_cooldown_until = 0.0
+            else:
+                in_stage_transition = True
+
+        if time.time() < self.stage_clear_cooldown_until and current_hp <= 0:
+            in_stage_transition = True
+
+        # First intro/tutorial level load: seed the life counter with the configured
+        # DeathLink amnesty. This only runs once per client launch, and it waits
+        # until HP looks like active gameplay so it does not write during menus.
+        if (
+            not self.initial_tutorial_amnesty_applied
+            and current_hp > 0
+            and current_hp <= max_health_value
+        ):
+            amnesty_lives = self._deathlink_amnesty_value()
+            await self._write_life_count(ctx, amnesty_lives)
+            current_lives = amnesty_lives
+            self.current_lives = current_lives
+            self.deathlink_amnesty_lives = amnesty_lives
+            self.last_life_count = current_lives
+            self.initial_tutorial_amnesty_applied = True
+            logger.info(f"First tutorial level load detected; set MMX4 lives to DeathLink amnesty value: {amnesty_lives}.")
+
         await self._show_energy_link_ui(ctx, current_hp, max_health_value)
 
         if self.force_death_pending:
             self.force_death_pending = False
-            await self._write_current_hp(ctx, 0)
-            self.last_hp = 0
+            amnesty_lives = self._deathlink_amnesty_value()
+            self.pending_life_reset_value = amnesty_lives
+            self.pending_life_reset_until = time.time() + 8.0
+            self.deathlink_suppress_outgoing_until = time.time() + 8.0
+
+            # Fill lives before forcing the death, then keep reapplying below for a
+            # few seconds because MMX4 may decrement the counter during the death flow.
+            await self._write_life_count(ctx, amnesty_lives)
+            await self._force_player_death(ctx)
+            current_lives = amnesty_lives
+            self.current_lives = current_lives
+            self.deathlink_amnesty_lives = amnesty_lives
+            self.last_life_count = current_lives
+            logger.info(f"Received DeathLink; forced MMX4 death and reset lives to amnesty value: {amnesty_lives}.")
+            self._update_inventory_tab_safe(ctx)
             return
 
-        if self.pending_damage > 0:
+        # Keep the amnesty reset alive through the death/respawn transition.
+        if self.pending_life_reset_until and time.time() < self.pending_life_reset_until:
+            reset_value = max(1, int(self.pending_life_reset_value or self._deathlink_amnesty_value()))
+            if current_lives < reset_value:
+                await self._write_life_count(ctx, reset_value)
+                current_lives = reset_value
+                self.current_lives = current_lives
+                self.last_life_count = current_lives
+        elif self.pending_life_reset_until and time.time() >= self.pending_life_reset_until:
+            self.pending_life_reset_until = 0.0
+            self.pending_life_reset_value = 0
+
+        if self.pending_damage > 0 and not in_stage_transition:
             damage_points = int(self.pending_damage) + int(self.pending_damage_point_remainder)
             self.pending_damage = 0
             hp_damage = damage_points // DAMAGE_LINK_POINTS_PER_HP
             self.pending_damage_point_remainder = damage_points % DAMAGE_LINK_POINTS_PER_HP
             if hp_damage > 0:
                 self.ignore_next_damage = True
-                new_hp = max(0, current_hp - hp_damage)
-                await self._write_current_hp(ctx, new_hp)
-                current_hp = new_hp
+                current_hp = max(0, current_hp - hp_damage)
+                await self._write_current_hp(ctx, current_hp)
+                self.current_hp = current_hp
+        elif self.pending_damage > 0 and in_stage_transition:
+            # Do not let queued shared damage apply during stage loading / clear transitions.
+            self.pending_damage = 0
+            self.pending_damage_point_remainder = 0
 
-        # DeathLink must be checked before EnergyLink auto-healing.
-        # Otherwise HP can hit 0, immediately heal from the pool, and never send death.
-        if self.last_hp is not None and self._slot_option_enabled("death_link") and self.last_hp > 0 and current_hp <= 0:
-            if self.ignore_next_death:
-                self.ignore_next_death = False
-            else:
+        # DeathLink is based only on the MMX4 life counter. HP and stage transitions do not block it.
+        # If lives hit 0, send DeathLink first, then refill lives to the current amnesty value.
+        if (
+            self.last_life_count is not None
+            and self._slot_option_enabled("death_link")
+            and not ctx.finished_game
+            and self.last_life_count > 0
+            and current_lives <= 0
+        ):
+            amnesty_lives = self._deathlink_amnesty_value()
+
+            if time.time() >= self.deathlink_suppress_outgoing_until:
                 await ctx.send_msgs([{
                     "cmd": "Bounce",
                     "tags": ["DeathLink"],
@@ -637,14 +779,37 @@ class MMX4Client(BizHawkClient):
                         "time": time.time(),
                         "uuid": self.damage_link_uuid,
                         "source": ctx.player_names[ctx.slot],
-                        "cause": "died in Mega Man X4"
+                        "cause": "ran out of lives in Mega Man X4"
                     }
                 }])
+                logger.info("Sent DeathLink for Mega Man X4 lives reaching 0.")
+            else:
+                logger.info("MMX4 lives reached 0 from received DeathLink; outgoing DeathLink suppressed.")
+
+            await self._write_life_count(ctx, amnesty_lives)
+            current_lives = amnesty_lives
+            self.current_lives = current_lives
+            self.deathlink_amnesty_lives = amnesty_lives
+            self.pending_life_reset_value = amnesty_lives
+            self.pending_life_reset_until = time.time() + 4.0
+            logger.info(f"Reset MMX4 lives to DeathLink amnesty value: {amnesty_lives}.")
+
+            self.last_life_count = current_lives
             self.last_hp = current_hp
             self._update_inventory_tab_safe(ctx)
             return
 
-        if self._slot_option_enabled("energy_link") and self._slot_option_enabled("energy_link_auto_heal"):
+        if current_lives > 0:
+            self.deathlink_amnesty_lives = self._deathlink_amnesty_value()
+
+        # EnergyLink auto-heal only runs while alive and outside loading/stage-clear transitions.
+        if (
+            self._slot_option_enabled("energy_link")
+            and self._slot_option_enabled("energy_link_auto_heal")
+            and not in_stage_transition
+            and current_hp > 0
+            and current_lives > 0
+        ):
             energy_key = self._energy_key(ctx)
             pool = self._get_energy_pool(ctx)
             cost_per_hp = max(1, int((self.slot_data or {}).get("energy_link_cost_per_hp", 5) or 5))
@@ -658,17 +823,17 @@ class MMX4Client(BizHawkClient):
                     "want_reply": True
                 }])
                 current_hp += heal_amount
+                self.current_hp = current_hp
+                self.current_energy_pool = max(0, pool - heal_amount * cost_per_hp)
                 await self._write_current_hp(ctx, current_hp)
 
-        if self.last_hp is not None:
+        # DamageLink still uses HP loss, but it is disabled during transition screens.
+        if not in_stage_transition and self.last_hp is not None:
             if self._slot_option_enabled("damage_link") and current_hp < self.last_hp:
                 hp_lost = self.last_hp - current_hp
                 if self.ignore_next_damage:
                     self.ignore_next_damage = False
                 else:
-                    # Outgoing DamageLink uses points, not raw HP.
-                    # Normal hits are capped at 120 points like Mega Man X.
-                    # Lethal hits still send all HP lost as damage points.
                     damage_points = hp_lost * DAMAGE_LINK_POINTS_PER_HP
                     if current_hp > 0:
                         damage_points = min(damage_points, DAMAGE_LINK_NORMAL_CAP_POINTS)
@@ -684,7 +849,14 @@ class MMX4Client(BizHawkClient):
                         }
                     }])
 
-        self.last_hp = current_hp
+        if not in_stage_transition:
+            self.last_hp = current_hp
+        else:
+            self.last_hp = None
+            self.ignore_next_damage = False
+
+        self.last_life_count = current_lives
+        self._update_inventory_tab_safe(ctx)
 
     async def game_watcher(self, ctx: "BizHawkClientContext") -> None:
         if ctx.server is None:
@@ -727,6 +899,7 @@ class MMX4Client(BizHawkClient):
             max_health_value = 32
             unlocked_tanks_value = 0
             stage_access_writes = [0, 0, 0, 0, 0, 0, 0, 0, 1]
+            extra_lives_tank_count = 0
             for item in ctx.items_received:
                 item_id = item.item
                 # Weapons
@@ -775,17 +948,22 @@ class MMX4Client(BizHawkClient):
                 # Extra Lives Tank
                 if item_id == 14575116:
                     unlocked_tanks_value |= 0b10000000
+                    extra_lives_tank_count += 1
                 # Stage Access
                 if item_id >= 14575200 and item_id <= 14575207:
                     index = item_id - 14575200
                     stage_access_writes[index] = 1
-                # Victory
+                # Victory / boss item
+                # Once this has been received, stop sending outgoing DeathLinks.
+                # Incoming DeathLinks are still accepted if DeathLink is enabled.
                 if not ctx.finished_game and item_id == 14575400:
                     ctx.finished_game = True
                     await ctx.send_msgs([{
                         "cmd": "StatusUpdate",
                         "status": ClientStatus.CLIENT_GOAL
                     }])
+
+            self.extra_lives_tank_count = extra_lives_tank_count
 
             override_weapon = False
             # Detect selected weapon to allow charging any weapon as long as you have either plasma shot or stock charge
@@ -819,6 +997,9 @@ class MMX4Client(BizHawkClient):
             await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_TANK_FLAGS, [unlocked_tanks_value], self.ram)])
             # Write Stage Access
             await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_STAGE_ACCESS, stage_access_writes, self.ram)])
+            # Optional YAML setting: keep Nova Strike / Giga Attack energy full.
+            if self._slot_option_enabled("infinite_nova_strike"):
+                await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_NOVA_STRIKE_ENERGY, [0x30], self.ram)])
             await self._handle_link_features(ctx, max_health_value)
             await bizhawk.unlock(ctx.bizhawk_ctx)
             return
@@ -853,6 +1034,12 @@ class MMX4Client(BizHawkClient):
         # Read Bosses Defeated
         defeated_bosses = (await bizhawk.read(ctx.bizhawk_ctx, [(ADDRESS_BOSSES_DEFEATED, 22, self.ram)]))[0]
         if len(defeated_bosses) == 22:
+            defeated_bosses_bytes = bytes(defeated_bosses)
+            if self.last_bosses_defeated_bytes is not None:
+                if any(defeated_bosses_bytes[i] > self.last_bosses_defeated_bytes[i] for i in range(22)):
+                    self._mark_stage_clear_safe_window()
+            self.last_bosses_defeated_bytes = defeated_bosses_bytes
+
             for i in range(0, 22):
                 if defeated_bosses[i] > 0:
                     # Intro Boss
@@ -1056,6 +1243,18 @@ class MMX4Client(BizHawkClient):
                 locs_to_send.add(14574237)
             offset += 4
 
+        defeated_locs_seen = locs_to_send.intersection(DEFEATED_LOCATION_IDS)
+        if defeated_locs_seen:
+            checked_locations = set(getattr(ctx, "checked_locations", set()) or set())
+            newly_seen_defeated_locs = defeated_locs_seen - self.previous_defeated_locations_seen
+
+            # The boss flag can already be set by the time the client polls.
+            # Protect EnergyLink/DamageLink during weapon-get and stage-clear transitions.
+            if newly_seen_defeated_locs and not newly_seen_defeated_locs.issubset(checked_locations):
+                self._mark_stage_clear_safe_window()
+
+            self.previous_defeated_locations_seen.update(defeated_locs_seen)
+
         if locs_to_send is not None:
             await ctx.send_msgs([{"cmd": "LocationChecks", "locations": list(locs_to_send)}])
         return
@@ -1064,190 +1263,7 @@ class MMX4Client(BizHawkClient):
         return
 
 
-def _candidate_host_yaml_paths() -> list[Path]:
-    """Return likely Archipelago host.yaml paths.
-
-    The normal installed client runs with Archipelago's folder as cwd, but the
-    launcher/subprocess can vary depending on install method. Check the places
-    that matter before falling back.
-    """
-    paths: list[Path] = []
-
-    env_host = os.environ.get("ARCHIPELAGO_HOST_YAML") or os.environ.get("MMX4_HOST_YAML")
-    if env_host:
-        paths.append(Path(env_host))
-
-    paths.extend([
-        Path.cwd() / "host.yaml",
-        Path(sys.argv[0]).resolve().parent / "host.yaml",
-        Path(__file__).resolve().parents[1] / "host.yaml",
-        Path(__file__).resolve().parents[2] / "host.yaml",
-    ])
-
-    # Keep order, remove duplicates.
-    seen: set[str] = set()
-    unique: list[Path] = []
-    for path in paths:
-        try:
-            key = str(path.resolve())
-        except OSError:
-            key = str(path)
-        if key not in seen:
-            unique.append(path)
-            seen.add(key)
-    return unique
-
-
-def _load_host_yaml() -> dict:
-    # Prefer Archipelago's own option loader. This reads the active host.yaml
-    # from the same place the normal clients use, so the launcher working
-    # directory does not matter.
-    try:
-        from Utils import get_options
-        data = get_options() or {}
-        if isinstance(data, dict):
-            logger.info("Loaded host options through Utils.get_options().")
-            return data
-    except Exception as exc:
-        logger.info(f"Could not load host options through Utils.get_options(): {exc}")
-
-    # Fallback manual search for dev/custom installs.
-    for host_path in _candidate_host_yaml_paths():
-        if not host_path.is_file():
-            continue
-        try:
-            try:
-                import yaml
-                with host_path.open("r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f) or {}
-            except ImportError:
-                logger.info("PyYAML is not available, so host.yaml could not be parsed manually.")
-                data = {}
-            if isinstance(data, dict):
-                logger.info(f"Loaded host.yaml from {host_path}")
-                return data
-        except Exception as exc:
-            logger.info(f"Could not read host.yaml from {host_path}: {exc}")
-
-    logger.info("Could not find host.yaml. Set ARCHIPELAGO_HOST_YAML or MMX4_HOST_YAML if needed.")
-    return {}
-
-
-def _bizhawk_options_from_host() -> dict:
-    host = _load_host_yaml()
-    options = host.get("bizhawkclient_options", {}) if isinstance(host, dict) else {}
-    return options if isinstance(options, dict) else {}
-
-
-def _find_mmx4_rom(args: tuple[str, ...]) -> str | None:
-    # 1) If the launcher passed a ROM path, use it.
-    for arg in args:
-        if isinstance(arg, str) and arg.lower().endswith((".bin", ".cue", ".iso", ".chd")) and Path(arg).is_file():
-            logger.info(f"Using MMX4 ROM from launcher argument: {arg}")
-            return arg
-
-    # 2) Explicit override for testing or custom installs.
-    env_rom = os.environ.get("MMX4_ROM_PATH")
-    if env_rom and Path(env_rom).is_file():
-        logger.info(f"Using MMX4 ROM from MMX4_ROM_PATH: {env_rom}")
-        return env_rom
-
-    names = (
-        "Mega Man X4 (USA)-patched.bin",
-        "Mega Man X4 (USA)-patched.cue",
-        "Mega Man X4 (USA)-patched.iso",
-        "Mega Man X4 (USA)-patched.chd",
-    )
-
-    search_dirs: list[Path] = []
-
-    # Archipelago helper paths are better than guessing cwd.
-    try:
-        from Utils import local_path, user_path, output_path
-        search_dirs.extend([
-            Path(output_path()),
-            Path(user_path()),
-            Path(local_path()),
-            Path(local_path("output")),
-            Path(user_path("output")),
-        ])
-    except Exception:
-        pass
-
-    search_dirs.extend([
-        Path.cwd(),
-        Path(sys.argv[0]).resolve().parent,
-        Path.home() / "Downloads",
-        Path.home() / "Desktop",
-    ])
-
-    seen: set[str] = set()
-    for folder in search_dirs:
-        try:
-            folder = folder.resolve()
-        except OSError:
-            pass
-        key = str(folder)
-        if key in seen or not folder.is_dir():
-            continue
-        seen.add(key)
-        for name in names:
-            path = folder / name
-            if path.is_file():
-                logger.info(f"Using MMX4 ROM found at: {path}")
-                return str(path)
-
-    logger.info("Could not find Mega Man X4 (USA)-patched.bin in AP output/user/local/current/downloads folders.")
-    return None
-
-
-def _connector_script_path() -> str:
-    return str(Path(__file__).with_name("connector_bizhawk_generic.lua"))
-
-
-def _try_launch_bizhawk_with_connector(args: tuple[str, ...]) -> None:
-    bizhawk_options = _bizhawk_options_from_host()
-    rom_start = bizhawk_options.get("rom_start", True)
-
-    if rom_start is False:
-        logger.info("BizHawk auto-start is disabled by host.yaml bizhawkclient_options.rom_start.")
-        return
-
-    connector = _connector_script_path()
-    if not Path(connector).is_file():
-        logger.info("BizHawk connector Lua script was not found inside the APWorld.")
-        return
-
-    rom = _find_mmx4_rom(args)
-    if not rom:
-        logger.info("MMX4 patched ROM was not found. Put 'Mega Man X4 (USA)-patched.bin' beside the client, run from its folder, pass the ROM path to the client, or set MMX4_ROM_PATH.")
-        return
-
-    # host.yaml says rom_start can be true, false, or a program/path. If it is a
-    # string, use that as the launcher command. Otherwise use emuhawk_path.
-    if isinstance(rom_start, str) and rom_start.strip() and rom_start is not True:
-        command = [rom_start]
-    else:
-        emuhawk_path = bizhawk_options.get("emuhawk_path") or os.environ.get("MMX4_BIZHAWK_PATH") or os.environ.get("BIZHAWK_PATH")
-        if not emuhawk_path:
-            logger.info("host.yaml does not define bizhawkclient_options.emuhawk_path, so BizHawk was not auto-started.")
-            return
-        if not Path(str(emuhawk_path)).is_file():
-            logger.info(f"EmuHawk path from host.yaml was not found: {emuhawk_path}")
-            return
-        command = [str(emuhawk_path)]
-
-    command.extend([str(rom), f"--lua={connector}"])
-    logger.info(f"Starting BizHawk command: {command}")
-
-    try:
-        subprocess.Popen(command)
-        logger.info("Started BizHawk with the MMX4 patched ROM and connector script.")
-    except OSError as exc:
-        logger.info(f"Could not start BizHawk automatically: {exc}")
-
 
 def launch_client(*args: str) -> None:
-    _try_launch_bizhawk_with_connector(args)
     from worlds._bizhawk.context import launch
     launch(*args)

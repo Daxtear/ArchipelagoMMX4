@@ -83,8 +83,10 @@ class MMX4World(World):
             "death_link": bool(self.options.death_link.value),
             "damage_link": bool(self.options.damage_link.value),
             "energy_link": bool(self.options.energy_link.value),
+            "death_link_amnesty": int(self.options.death_link_amnesty.value),
             "energy_link_auto_heal": bool(self.options.energy_link_auto_heal.value),
             "energy_link_cost_per_hp": int(self.options.energy_link_cost_per_hp.value),
+            "infinite_nova_strike": bool(self.options.infinite_nova_strike.value),
         }
 
         return slot_data
