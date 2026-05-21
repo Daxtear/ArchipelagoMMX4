@@ -21,7 +21,7 @@ class Character(Choice):
     default = 0
 
 
-class EnergyLink(DefaultOnToggle):
+class EnergyLink(Toggle):
     """
     Enable EnergyLink support. When enabled, the client can spend EnergyLink to restore current HP.
     """
@@ -48,7 +48,7 @@ class DeathLinkAmnesty(Range):
     default = 3
 
 
-class EnergyLinkAutoHeal(DefaultOnToggle):
+class EnergyLinkAutoHeal(Toggle):
     """
     Automatically spend EnergyLink to heal missing HP during gameplay.
     """

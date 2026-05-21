@@ -6,6 +6,7 @@
 * A legally acquired Playstation BIOS
 * [Bizhawk](https://github.com/TASEmulators/BizHawk/releases)
 * The patch file which can be found on the releases page - "MMX4_Archipelago.xdelta"
+* The xdelta3 command line tool which you can find [here](https://github.com/jmacd/xdelta-gpl/releases/tag/v3.0.11)
 
 * The built-in Archipelago client, which can be installed [here](https://github.com/ArchipelagoMW/Archipelago/releases)
 
@@ -22,6 +23,23 @@ an experience customized for their taste, and different players in the same mult
 Check the releases page for the latest version of the YAML. Alternatively you can generate your own using the Archipelago Launcher.
 
 ### Connect to the MultiServer
+
+There are 2 ways to connect
+
+## 1. Using the .apmmx4 patch (Recommended)
+
+1. Install the APWorld
+2. Run the .apmmx4 file acquired from the lobby using the Archipelago Launcher
+	* If you don't have one, ask the host of your multiworld
+	* If you are the host, it is inside the .zip file in the Archipelago output folder
+3. If this is your first time running this, you may be asked to provide paths to your ROM file, the Patch file and xdelta3
+4. After a little bit three new windows should open:
+	* The Archipelago Bizhawk Client
+	* The Bizhawk Emulator
+	* The Bizhawk Lua Console
+5. Connect to your created room through the Archipelago Bizhawk Client
+
+## 2. Manual
 
 1. Install the APWorld
 2. Through the launcher run the Mega Man X4 Client

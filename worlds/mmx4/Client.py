@@ -179,6 +179,7 @@ ITEM_ID_TO_NAME = {
 class MMX4Client(BizHawkClient):
     game = "Mega Man X4"
     system = "PSX"
+    patch_suffix = ".apmmx4"
     weapon = 0
 
     def __init__(self) -> None:

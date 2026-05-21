@@ -21,4 +21,8 @@ Everything except Soul Body if you're playing as Zero as of this moment, as havi
 Every item is received immediately. Due to the nature of buster upgrades in this game when playing as X, only one of them can be equipped at a time. 
 Assuming you have either the Stock Charge or Plasma Shot Upgrade or both, you can cycle between them and the standard buster by holding down the Select button.
 
-*DO NOT PLAY AS BLACK ZERO*
+## Known Issues
+
+* Black Zero does not work
+* Loading the Title Screen currently sends a Death Link
+* Energy Link may cause stutters
