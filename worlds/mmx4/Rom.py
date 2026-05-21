@@ -23,12 +23,17 @@ class MMX4PatchExtension(APPatchExtension):
     @staticmethod
     def apply_basepatch(_: APProcedurePatch, rom: bytes) -> bytes:
         import subprocess
+        import sys
 
         with tempfile.TemporaryDirectory() as temp_dir:
             delta_tempfile = os.path.join(temp_dir, "patched_rom.bin")
             
             # Apply xdelta patch
-            subprocess.check_output([get_xdelta_path(), '-d', '-s', get_base_rom_path(), get_patch_path(), delta_tempfile], shell=True)
+            kwargs = {}
+            if sys.platform == "win32":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+            subprocess.check_call([get_xdelta_path(), '-d', '-s', get_base_rom_path(), get_patch_path(), delta_tempfile], **kwargs)
 
             # Read patched rom
             with open(delta_tempfile, "rb") as f:
