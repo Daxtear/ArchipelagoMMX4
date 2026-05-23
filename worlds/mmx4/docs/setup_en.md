@@ -22,11 +22,11 @@ an experience customized for their taste, and different players in the same mult
 
 Check the releases page for the latest version of the YAML. Alternatively you can generate your own using the Archipelago Launcher.
 
-### Connect to the MultiServer
+## Connect to the MultiServer
 
 There are 2 ways to connect
 
-## 1. Using the .apmmx4 patch (Recommended)
+### 1. Using the .apmmx4 patch (Recommended)
 
 1. Install the APWorld
 2. Run the .apmmx4 file acquired from the lobby using the Archipelago Launcher
@@ -39,7 +39,7 @@ There are 2 ways to connect
 	* The Bizhawk Lua Console
 5. Connect to your created room through the Archipelago Bizhawk Client
 
-## 2. Manual
+### 2. Manual
 
 1. Install the APWorld
 2. Through the launcher run the Mega Man X4 Client
