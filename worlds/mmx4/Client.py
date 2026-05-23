@@ -224,6 +224,10 @@ class MMX4Client(BizHawkClient):
         self.stage_clear_suppress_until_positive_hp = False
         self.weapon = 0
         self.read_results = []
+        self.hp_changed = False
+        self.lives_changed = False
+        self.hp_to_write = 0
+        self.lives_to_write = 0
 
     async def validate_rom(self, ctx: "BizHawkClientContext") -> bool:
         try:
@@ -232,8 +236,7 @@ class MMX4Client(BizHawkClient):
                 return False
             # Check ROM name/patch version
             rom_name = ((await bizhawk.read(ctx.bizhawk_ctx, [(ADDRESS_PATCH_NAME, 0x10, self.ram)]))[0])
-            rom_name = rom_name.decode("ascii")
-            if rom_name != "MMX4_ARCHIPELAGO":
+            if rom_name != b"MMX4_ARCHIPELAGO":
                 return False  # Not our patched ROM
         except bizhawk.RequestFailedError:
             return False  # Not able to get a response, say no for now
@@ -316,6 +319,14 @@ class MMX4Client(BizHawkClient):
 
     async def _write_current_hp(self, ctx: "BizHawkClientContext", value: int) -> None:
         await bizhawk.write(ctx.bizhawk_ctx, [(ADDRESS_CURRENT_HEALTH, [max(0, min(255, int(value)))], self.ram)])
+
+    async def _write_life_count_delayed(self, value: int) -> None:
+        self.lives_changed = True
+        self.lives_to_write = [max(0, min(255, int(value)))]
+
+    async def _write_current_hp_delayed(self, value: int) -> None:
+        self.hp_changed = True
+        self.hp_to_write = [max(0, min(255, int(value)))]
 
     async def _force_player_death(self, ctx: "BizHawkClientContext") -> None:
         # MMX4 action / animation state 0x03 is the dying/dead state.
@@ -678,8 +689,8 @@ class MMX4Client(BizHawkClient):
                 pass
 
     async def _handle_link_features(self, ctx: "BizHawkClientContext", max_health_value: int) -> None:
-        current_hp = await self._read_current_hp(ctx)
-        current_lives = await self._read_life_count(ctx)
+        current_hp = self.read_results[4][0]
+        current_lives = self.read_results[5][0]
         self.current_hp = current_hp
         self.current_lives = current_lives
         self.current_max_hp = max_health_value
@@ -707,7 +718,7 @@ class MMX4Client(BizHawkClient):
             and current_hp <= max_health_value
         ):
             amnesty_lives = self._deathlink_amnesty_value()
-            await self._write_life_count(ctx, amnesty_lives)
+            await self._write_life_count_delayed(amnesty_lives)
             current_lives = amnesty_lives
             self.current_lives = current_lives
             self.deathlink_amnesty_lives = amnesty_lives
@@ -726,7 +737,7 @@ class MMX4Client(BizHawkClient):
 
             # Fill lives before forcing the death, then keep reapplying below for a
             # few seconds because MMX4 may decrement the counter during the death flow.
-            await self._write_life_count(ctx, amnesty_lives)
+            await self._write_life_count_delayed(amnesty_lives)
             await self._force_player_death(ctx)
             current_lives = amnesty_lives
             self.current_lives = current_lives
@@ -740,7 +751,7 @@ class MMX4Client(BizHawkClient):
         if self.pending_life_reset_until and time.time() < self.pending_life_reset_until:
             reset_value = max(1, int(self.pending_life_reset_value or self._deathlink_amnesty_value()))
             if current_lives < reset_value:
-                await self._write_life_count(ctx, reset_value)
+                await self._write_life_count_delayed(reset_value)
                 current_lives = reset_value
                 self.current_lives = current_lives
                 self.last_life_count = current_lives
@@ -756,7 +767,7 @@ class MMX4Client(BizHawkClient):
             if hp_damage > 0:
                 self.ignore_next_damage = True
                 current_hp = max(0, current_hp - hp_damage)
-                await self._write_current_hp(ctx, current_hp)
+                await self._write_current_hp_delayed(current_hp)
                 self.current_hp = current_hp
         elif self.pending_damage > 0 and in_stage_transition:
             # Do not let queued shared damage apply during stage loading / clear transitions.
@@ -789,7 +800,7 @@ class MMX4Client(BizHawkClient):
             else:
                 logger.info("MMX4 lives reached 0 from received DeathLink; outgoing DeathLink suppressed.")
 
-            await self._write_life_count(ctx, amnesty_lives)
+            await self._write_life_count_delayed(amnesty_lives)
             current_lives = amnesty_lives
             self.current_lives = current_lives
             self.deathlink_amnesty_lives = amnesty_lives
@@ -828,7 +839,7 @@ class MMX4Client(BizHawkClient):
                 current_hp += heal_amount
                 self.current_hp = current_hp
                 self.current_energy_pool = max(0, pool - heal_amount * cost_per_hp)
-                await self._write_current_hp(ctx, current_hp)
+                await self._write_current_hp_delayed(current_hp)
 
         # DamageLink still uses HP loss, but it is disabled during transition screens.
         if not in_stage_transition and self.last_hp is not None:
@@ -896,7 +907,9 @@ class MMX4Client(BizHawkClient):
                 (ADDRESS_ARMOR_PICKED_UP, 5, self.ram), # 0 = armor picked up
                 (ADDRESS_BOSSES_DEFEATED, 22, self.ram), # 1 = bosses defeated
                 (ADDRESS_WEAPON_SELECTED, 1, self.ram), # 2 = selected weapon
-                (ADDRESS_SELECT_PRESSED, 1, self.ram) # 3 = select pressed
+                (ADDRESS_SELECT_PRESSED, 1, self.ram), # 3 = select pressed
+                (ADDRESS_CURRENT_HEALTH, 1, self.ram), # 4 = current health
+                (ADDRESS_LIFE_COUNT, 1, self.ram) # 5 = life count
                 ]);
             await self.location_check(ctx)
             await self._process_energy_pickups(ctx)
@@ -994,33 +1007,32 @@ class MMX4Client(BizHawkClient):
                 unlocked_armor_value |= 0b100
 
             # Lock here before we do our edits
-            await bizhawk.lock(ctx.bizhawk_ctx)
-            addresses_to_write = []
-            
+            addresses_to_write = [
+                (ADDRESS_WEAPONS_FLAGS, [unlocked_weapons_value], self.ram), # Weapons
+                (ADDRESS_ARMOR_FLAGS, [unlocked_armor_value], self.ram), # Armor
+                (ADDRESS_ARMS_FLAGS, [self.weapon], self.ram), # Buster Type
+                (ADDRESS_MAX_HEALTH, [max_health_value], self.ram), # Max Health
+                (ADDRESS_TANK_FLAGS, [unlocked_tanks_value], self.ram), # Tanks
+                (ADDRESS_STAGE_ACCESS, stage_access_writes, self.ram) # Stage Access
+                ]
+
             # Optional YAML setting: keep Nova Strike / Giga Attack energy full.
             if self._slot_option_enabled("infinite_nova_strike"):
-                addresses_to_write = [
-                    (ADDRESS_WEAPONS_FLAGS, [unlocked_weapons_value], self.ram), # Weapons
-                    (ADDRESS_ARMOR_FLAGS, [unlocked_armor_value], self.ram), # Armor
-                    (ADDRESS_ARMS_FLAGS, [self.weapon], self.ram), # Buster Type
-                    (ADDRESS_MAX_HEALTH, [max_health_value], self.ram), # Max Health
-                    (ADDRESS_TANK_FLAGS, [unlocked_tanks_value], self.ram), # Tanks
-                    (ADDRESS_STAGE_ACCESS, stage_access_writes, self.ram), # Stage Access
-                    (ADDRESS_NOVA_STRIKE_ENERGY, [0x30], self.ram) # Infinite Nova Strike
-                    ]
-            else:
-                addresses_to_write = [
-                    (ADDRESS_WEAPONS_FLAGS, [unlocked_weapons_value], self.ram), # Weapons
-                    (ADDRESS_ARMOR_FLAGS, [unlocked_armor_value], self.ram), # Armor
-                    (ADDRESS_ARMS_FLAGS, [self.weapon], self.ram), # Buster Type
-                    (ADDRESS_MAX_HEALTH, [max_health_value], self.ram), # Max Health
-                    (ADDRESS_TANK_FLAGS, [unlocked_tanks_value], self.ram), # Tanks
-                    (ADDRESS_STAGE_ACCESS, stage_access_writes, self.ram) # Stage Access
-                    ]
+                addresses_to_write.append((ADDRESS_NOVA_STRIKE_ENERGY, [0x30], self.ram)) # Infinite Nova Strike
+
+            # Energylink, Deathlink & Damagelink
+            await self._handle_link_features(ctx, max_health_value)
+            if self.hp_changed:
+                self.hp_changed = False
+                addresses_to_write.append((ADDRESS_CURRENT_HEALTH, self.hp_to_write, self.ram))
+
+            if self.lives_changed:
+                self.lives_changed = False
+                addresses_to_write.append((ADDRESS_LIFE_COUNT, self.lives_to_write, self.ram))
 
             # Write Values
+            await bizhawk.lock(ctx.bizhawk_ctx)
             await bizhawk.write(ctx.bizhawk_ctx, addresses_to_write)
-            await self._handle_link_features(ctx, max_health_value)
             await bizhawk.unlock(ctx.bizhawk_ctx)
             return
 
