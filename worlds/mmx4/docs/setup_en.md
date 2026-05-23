@@ -51,14 +51,14 @@ There are 2 ways to connect
    * (Your Archipelago Installation Folder)/Data/Lua
 7. Connect to your created room through the Bizhawk Client Tool in the Archipelago Launcher
 
-### FAQ
+## FAQ
 
-## Help! My controller isn't working!
+### Help! My controller isn't working!
 * Mega Man X4 is from a time before analog sticks. You very likely have an analog controller defined in Bizhawk
 * To change this:
 * PSX -> Settings -> Sync Settings -> Virtual Port 1 -> Digital Gamepad
 
-## My character keeps dying when I pick up health and there are these splotches in the top left corner
+### My character keeps dying when I pick up health and there are these splotches in the top left corner
 * Something in the chain of connections is not connected to the next
 * Check that:
 	* The Lua script is running
