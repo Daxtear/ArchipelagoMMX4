@@ -64,3 +64,10 @@ There are 2 ways to connect
 	* The Lua script is running
 	* The Correct client is running (The Bizhawk Client, not the normal text client)
 	* The Client is connected to the Multiworld and you're authenticated
+
+### I don't have a .apmmx4 file
+* You are running an old version of the apworld
+* Either:
+	* Update to the newest apworld
+	* Use the manual setup instructions
+		* You might want to update your apworld anyway though after you're done
