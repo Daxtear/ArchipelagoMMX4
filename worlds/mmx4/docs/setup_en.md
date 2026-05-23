@@ -50,3 +50,17 @@ There are 2 ways to connect
 6. In the Lua Console open connector_bizhawk_generic.lua which should be in:
    * (Your Archipelago Installation Folder)/Data/Lua
 7. Connect to your created room through the Bizhawk Client Tool in the Archipelago Launcher
+
+### FAQ
+
+## Help! My controller isn't working!
+* Mega Man X4 is from a time before analog sticks. You very likely have an analog controller defined in Bizhawk
+* To change this:
+* PSX -> Settings -> Sync Settings -> Virtual Port 1 -> Digital Gamepad
+
+## My character keeps dying when I pick up health and there are these splotches in the top left corner
+* Something in the chain of connections is not connected to the next
+* Check that:
+	* The Lua script is running
+	* The Correct client is running (The Bizhawk Client, not the normal text client)
+	* The Client is connected to the Multiworld and you're authenticated
