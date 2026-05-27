@@ -114,6 +114,8 @@ class MMX4World(World):
             "energy_link_auto_heal": bool(self.options.energy_link_auto_heal.value),
             "energy_link_cost_per_hp": int(self.options.energy_link_cost_per_hp.value),
             "infinite_nova_strike": bool(self.options.infinite_nova_strike.value),
+            "character": int(self.options.character.value),
+            "pickupsanity": bool(self.options.pickupsanity.value),
         }
 
         return slot_data
