@@ -781,7 +781,7 @@ class MMX4Client(BizHawkClient):
             and self._slot_option_enabled("death_link")
             and not ctx.finished_game
             and self.last_life_count > 0
-            and current_lives <= 0
+            and current_lives <= 255
         ):
             amnesty_lives = self._deathlink_amnesty_value()
 
@@ -813,7 +813,7 @@ class MMX4Client(BizHawkClient):
             self._update_inventory_tab_safe(ctx)
             return
 
-        if current_lives > 0:
+        if current_lives > 255:
             self.deathlink_amnesty_lives = self._deathlink_amnesty_value()
 
         # EnergyLink auto-heal only runs while alive and outside loading/stage-clear transitions.
