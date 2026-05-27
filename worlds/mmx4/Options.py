@@ -41,6 +41,7 @@ class DeathLinkAmnesty(Range):
     """
     Number of lives to restore after sending or receiving a DeathLink.
     This prevents DeathLink from immediately causing repeated game overs.
+    Receiving the EX Tank will increase this by 2.
     """
     display_name = "DeathLink Amnesty"
     range_start = 1
