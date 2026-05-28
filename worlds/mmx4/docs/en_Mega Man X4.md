@@ -24,5 +24,4 @@ Assuming you have either the Stock Charge or Plasma Shot Upgrade or both, you ca
 ## Known Issues
 
 * Black Zero does not work
-* Loading the Title Screen currently sends a Death Link
 * Energy Link may cause stutters
