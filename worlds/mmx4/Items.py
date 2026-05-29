@@ -54,8 +54,8 @@ def create_junk_items(world: "MMX4World", count: int) -> List[Item]:
     junk_list: Dict[str, int] = {}
     trap_list: Dict[str, int] = {}
 
-    for name in item_table.keys():
-        ic = item_table[name].classification_zero if is_zero(world) else item_table[name].classification
+    for name in junk_items.keys():
+        ic = junk_items[name].classification_zero if is_zero(world) else junk_items[name].classification
         if ic == ItemClassification.filler:
             junk_list[name] = 1
 
