@@ -71,3 +71,7 @@ There are 2 ways to connect
 	* Update to the newest apworld
 	* Use the manual setup instructions
 		* You might want to update your apworld anyway though after you're done
+
+### I only get the armor capsule in Cyber Peacock's stage
+* When playing as Zero, that's currently the way it is
+* The other locations don't have any items in them though, so don't worry about it
